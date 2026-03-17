@@ -1,0 +1,16 @@
+node_modules/
+dist/
+
+# Local data — contains personal info and credentials
+data/
+!data/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# Drizzle migrations (generated)
+drizzle/
+
+# OS
+.DS_Store
