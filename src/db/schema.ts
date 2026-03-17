@@ -105,6 +105,7 @@ export type JobStatus =
   | "skipped"
   | "applying"
   | "applied"
+  | "email_ready"  // email drafted + copied to clipboard, not yet confirmed sent
   | "interviewing"
   | "rejected"
   | "ghosted"

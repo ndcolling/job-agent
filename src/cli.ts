@@ -5,6 +5,7 @@ import { desc, eq } from "drizzle-orm";
 import { runAgent } from "./agent/orchestrator";
 import { applyToWellfoundJob } from "./apply/wellfound";
 import { runMigrations, db, schema } from "./db/client";
+import { findJobByUrl, upsertJob, updateJobStatus, recordApplicationRun, getApplicationHistory } from "./db/jobs";
 import { deleteFromBank, saveToBank } from "./profile/qabank";
 import { loadProfile, profileExists, saveProfile } from "./profile/store";
 import { runWizard } from "./profile/wizard";
@@ -153,9 +154,54 @@ program
     requireProfile();
 
     const profile = loadProfile();
-
-    // 1. Scrape the job page
     const spin = p.spinner();
+
+    // ── 1. Pre-flight: check if this URL is already in the pipeline ──────────
+    const existing = await findJobByUrl(url);
+    if (existing) {
+      const alreadyApplied =
+        existing.status === "applied" ||
+        existing.status === "email_ready" ||
+        existing.status === "interviewing" ||
+        existing.status === "offer";
+
+      if (alreadyApplied) {
+        const history = await getApplicationHistory(existing.id);
+        const lastRun = history[history.length - 1];
+
+        p.note(
+          [
+            `Status  : ${chalk.bold(existing.status)}`,
+            `Applied : ${existing.appliedAt ?? "unknown"}`,
+            lastRun?.submittedAt
+              ? `Last run: ${lastRun.submittedAt}`
+              : undefined,
+            existing.notes ? `Notes   : ${existing.notes}` : undefined,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          `Already in pipeline: ${existing.title} @ ${existing.company}`
+        );
+
+        const reapply = await p.confirm({
+          message: `This job is marked "${existing.status}". Apply again anyway?`,
+          initialValue: false,
+        });
+        if (p.isCancel(reapply) || !reapply) {
+          p.outro("Cancelled.");
+          return;
+        }
+      } else {
+        // In pipeline but not yet applied — resume from where it was
+        console.log(
+          chalk.dim(
+            `\n  Resuming: ${existing.title} @ ${existing.company} (status: ${existing.status})\n`
+          )
+        );
+      }
+    }
+
+    // ── 2. Scrape ────────────────────────────────────────────────────────────
     spin.start("Scraping job listing...");
     let job;
     try {
@@ -167,7 +213,7 @@ program
       process.exit(1);
     }
 
-    // 2. Show job summary
+    // ── 3. Show summary ──────────────────────────────────────────────────────
     console.log();
     console.log(chalk.dim(`  Location : ${job.location ?? "not specified"} ${job.remote ? "(remote)" : ""}`));
     console.log(chalk.dim(`  Method   : ${job.applicationMethod}`));
@@ -180,7 +226,8 @@ program
     }
     console.log();
 
-    // 3. Score against profile
+    // ── 4. Score ─────────────────────────────────────────────────────────────
+    let matchScore: number | undefined;
     if (!opts.skipScore) {
       spin.start("Scoring against your profile...");
       const scored = await scoreJob(
@@ -196,17 +243,12 @@ program
         },
         profile
       );
-      spin.stop(
-        `Match score: ${chalk.bold(String(Math.round(scored.score)))} / 100`
-      );
+      matchScore = scored.score;
+      spin.stop(`Match score: ${chalk.bold(String(Math.round(scored.score)))} / 100`);
 
       console.log(chalk.dim(`  ${scored.reasoning}`));
-      if (scored.highlights.length) {
-        scored.highlights.forEach((h) => console.log(chalk.green(`  ✓ ${h}`)));
-      }
-      if (scored.redFlags.length) {
-        scored.redFlags.forEach((f) => console.log(chalk.yellow(`  ⚠ ${f}`)));
-      }
+      scored.highlights.forEach((h) => console.log(chalk.green(`  ✓ ${h}`)));
+      scored.redFlags.forEach((f) => console.log(chalk.yellow(`  ⚠ ${f}`)));
       console.log();
 
       if (scored.score < 40) {
@@ -221,18 +263,9 @@ program
       }
     }
 
-    if (opts.dryRun) {
-      p.note("Dry run — stopping before application.", "Dry run");
-      return;
-    }
-
-    // 4. Apply
-    const result = await applyToWellfoundJob(job, profile);
-
-    // 5. Update DB
-    const jobRecord = {
-      id: crypto.randomUUID(),
-      source: "wellfound" as const,
+    // Save/update the job record now so we have an ID for the application run
+    const jobRecord = await upsertJob({
+      source: "wellfound",
       title: job.title,
       company: job.company,
       url,
@@ -240,24 +273,117 @@ program
       location: job.location ?? undefined,
       remote: job.remote ? "remote" : "onsite",
       atsPlatform: job.applicationMethod,
-      status: result.status === "submitted" ? "applied" : "scored",
-      appliedAt: result.status === "submitted" ? new Date().toISOString() : undefined,
+      matchScore,
+      status: "applying", // mark in-progress so a crash doesn't leave it as "scored"
       salaryCurrency: "USD",
-    };
+    });
 
-    await db
-      .insert(schema.jobs)
-      .values(jobRecord)
-      .onConflictDoNothing()
-      .catch(() => null); // URL already in DB
-
-    if (result.status === "submitted") {
-      p.outro(chalk.green("Application submitted and saved to pipeline."));
-    } else if (result.status === "email_ready") {
-      p.outro("Email draft ready. Saved to pipeline as 'scored'.");
-    } else if (result.status === "external") {
-      p.outro(`External ATS link: ${result.url}`);
+    if (opts.dryRun) {
+      await updateJobStatus(jobRecord.id, "scored");
+      p.note("Dry run — stopped before application. Status reset to 'scored'.", "Dry run");
+      return;
     }
+
+    // ── 5. Apply ─────────────────────────────────────────────────────────────
+    const result = await applyToWellfoundJob(job, profile);
+
+    // ── 6. Persist result ─────────────────────────────────────────────────────
+    if (result.status === "submitted") {
+      await updateJobStatus(jobRecord.id, "applied", {
+        appliedAt: new Date().toISOString(),
+      });
+      await recordApplicationRun(jobRecord.id, { status: "submitted" });
+      p.outro(chalk.green("Application submitted and saved to pipeline."));
+
+    } else if (result.status === "email_ready") {
+      await updateJobStatus(jobRecord.id, "email_ready");
+      await recordApplicationRun(jobRecord.id, {
+        status: "email_ready",
+        notes: `Email to: ${job.emailAddress}`,
+      });
+      p.outro(
+        "Email draft copied to clipboard. Mark as applied once sent:\n" +
+        chalk.cyan(`  pnpm dev status ${jobRecord.id} applied`)
+      );
+
+    } else if (result.status === "external") {
+      await updateJobStatus(jobRecord.id, "scored", {
+        notes: `External ATS: ${result.url}`,
+      });
+      await recordApplicationRun(jobRecord.id, {
+        status: "external",
+        notes: result.url,
+      });
+      p.outro(`External ATS — open manually: ${result.url}`);
+
+    } else if (result.status === "error") {
+      await updateJobStatus(jobRecord.id, "scored", {
+        notes: `Error: ${result.message}`,
+      });
+      await recordApplicationRun(jobRecord.id, {
+        status: "failed",
+        errorMessage: result.message,
+      });
+      console.error(chalk.red(`Error: ${result.message}`));
+
+    } else {
+      // cancelled — reset back to scored so it stays in the review queue
+      await updateJobStatus(jobRecord.id, "scored");
+    }
+  });
+
+// ── status ────────────────────────────────────────────────────────────────────
+
+program
+  .command("status <jobId> <status>")
+  .description("Manually update a job's pipeline status")
+  .option("--notes <text>", "Optional notes")
+  .action(async (jobId: string, status: string, opts) => {
+    await ensureDb();
+
+    const validStatuses = [
+      "discovered", "scored", "approved", "skipped", "applying",
+      "applied", "email_ready", "interviewing", "rejected", "ghosted", "offer",
+    ];
+    if (!validStatuses.includes(status)) {
+      console.error(chalk.red(`Invalid status "${status}". Valid: ${validStatuses.join(", ")}`));
+      process.exit(1);
+    }
+
+    const extras: { notes?: string; appliedAt?: string } = {};
+    if (opts.notes) extras.notes = opts.notes;
+    if (status === "applied") extras.appliedAt = new Date().toISOString();
+
+    await updateJobStatus(jobId, status as any, extras);
+    console.log(chalk.green(`✓ ${jobId} → ${status}`));
+  });
+
+// ── history ───────────────────────────────────────────────────────────────────
+
+program
+  .command("history <jobId>")
+  .description("Show all application attempts for a job")
+  .action(async (jobId: string) => {
+    await ensureDb();
+
+    const runs = await getApplicationHistory(jobId);
+    if (runs.length === 0) {
+      console.log(chalk.dim("No application runs recorded for this job."));
+      return;
+    }
+
+    console.log(chalk.bold(`\n${runs.length} application run(s):\n`));
+    runs.forEach((run, i) => {
+      const statusColor =
+        run.status === "submitted" ? chalk.green
+        : run.status === "failed" ? chalk.red
+        : chalk.yellow;
+
+      console.log(`  ${i + 1}. ${statusColor(run.status)}  ${chalk.dim(run.startedAt ?? "")}`);
+      if (run.notes) console.log(chalk.dim(`     ${run.notes}`));
+      if (run.errorMessage) console.log(chalk.red(`     Error: ${run.errorMessage}`));
+    });
+    console.log();
   });
 
 // ── bank ──────────────────────────────────────────────────────────────────────
