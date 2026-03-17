@@ -3,6 +3,7 @@ import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { Page } from "playwright";
 import { config } from "../config";
+import { findSimilarAnswer, saveToBank, BankMatch } from "../profile/qabank";
 import { Profile } from "../profile/types";
 import { WellfoundJob, WellfoundFormQuestion } from "../search/wellfound";
 import { createBrowserSession, humanDelay, humanType } from "./browser";
@@ -11,11 +12,17 @@ const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+export interface AnswerMeta {
+  answer: string;
+  source: "bank" | "generated";
+  bankMatch?: BankMatch; // present when source === "bank"
+}
+
 export interface ApplicationDraft {
   method: WellfoundJob["applicationMethod"];
   // form
   introNote?: string;
-  answers?: Record<string, string>; // question label → drafted answer
+  answers?: Record<string, AnswerMeta>; // question label → answer + source
   // email
   emailTo?: string;
   emailSubject?: string;
@@ -135,11 +142,26 @@ Guidelines:
       response.content[0].type === "text" ? response.content[0].text : "";
   }
 
-  // Draft answers for each custom question
+  // Draft answers for each custom question — check bank first
   if (job.formQuestions.length > 0) {
     for (const question of job.formQuestions) {
-      const answer = await draftAnswer(question.label, job, profileContext, question.type);
-      draft.answers![question.label] = answer;
+      const bankMatch = await findSimilarAnswer(question.label, profile.qaBank);
+
+      if (bankMatch) {
+        draft.answers![question.label] = {
+          answer: bankMatch.answer,
+          source: "bank",
+          bankMatch,
+        };
+      } else {
+        const generated = await draftAnswer(
+          question.label,
+          job,
+          profileContext,
+          question.type
+        );
+        draft.answers![question.label] = { answer: generated, source: "generated" };
+      }
     }
   }
 
@@ -249,9 +271,20 @@ async function reviewDraft(
     }
 
     if (draft.answers && Object.keys(draft.answers).length > 0) {
-      for (const [question, answer] of Object.entries(draft.answers)) {
-        console.log(chalk.cyan(`Q: ${question}`));
-        console.log(answer);
+      for (const [question, meta] of Object.entries(draft.answers)) {
+        const sourceLabel =
+          meta.source === "bank"
+            ? chalk.green(
+                `[bank: ${meta.bankMatch?.confidence}${
+                  meta.bankMatch?.matchedQuestion !== question
+                    ? ` → "${meta.bankMatch?.matchedQuestion}"`
+                    : ""
+                }]`
+              )
+            : chalk.yellow("[generated]");
+
+        console.log(chalk.cyan(`Q: ${question}`) + " " + sourceLabel);
+        console.log(meta.answer);
         console.log();
       }
     }
@@ -272,6 +305,7 @@ async function reviewDraft(
     options: [
       { value: "submit", label: "Submit / proceed" },
       { value: "edit-intro", label: "Edit introduction note", hint: "opens $EDITOR" },
+      { value: "save-answers", label: "Save generated answers to QA bank" },
       { value: "cancel", label: "Cancel" },
     ],
   });
@@ -280,10 +314,47 @@ async function reviewDraft(
 
   if (action === "edit-intro" && draft.method === "wellfound-form") {
     draft.introNote = await openInEditor(draft.introNote ?? "");
-    return reviewDraft(job, draft); // recursive re-review after edit
+    return reviewDraft(job, draft);
+  }
+
+  if (action === "save-answers" && draft.answers) {
+    await promptSaveAnswers(draft.answers);
+    return reviewDraft(job, draft);
   }
 
   return true;
+}
+
+async function promptSaveAnswers(
+  answers: Record<string, AnswerMeta>
+): Promise<void> {
+  const generated = Object.entries(answers).filter(
+    ([, meta]) => meta.source === "generated"
+  );
+
+  if (generated.length === 0) {
+    p.note("All answers came from your QA bank — nothing new to save.", "QA Bank");
+    return;
+  }
+
+  for (const [question, meta] of generated) {
+    const save = await p.confirm({
+      message: `Save answer for "${question}" to QA bank?`,
+      initialValue: true,
+    });
+
+    if (!p.isCancel(save) && save) {
+      // Let user edit the canonical question key before saving
+      const canonicalQ = await p.text({
+        message: "Save under this question (edit to generalise):",
+        initialValue: question,
+      });
+      if (!p.isCancel(canonicalQ) && canonicalQ) {
+        saveToBank(String(canonicalQ), meta.answer);
+        console.log(chalk.green(`  ✓ Saved`));
+      }
+    }
+  }
 }
 
 // ── Form Submission ───────────────────────────────────────────────────────────
@@ -334,10 +405,10 @@ async function submitForm(
     // Fill custom question answers
     if (draft.answers) {
       for (const question of job.formQuestions) {
-        const answer = draft.answers[question.label];
-        if (!answer) continue;
+        const meta = draft.answers[question.label];
+        if (!meta) continue;
 
-        await fillQuestion(page, question, answer);
+        await fillQuestion(page, question, meta.answer);
         await humanDelay(300, 600);
       }
     }

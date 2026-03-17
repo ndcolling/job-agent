@@ -25,7 +25,8 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(gh repo:*)",
-      "Bash(ls src/**/*)"
+      "Bash(ls src/**/*)",
+      "Bash(git push:*)"
     ]
   }
 }

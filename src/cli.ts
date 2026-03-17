@@ -5,7 +5,8 @@ import { desc, eq } from "drizzle-orm";
 import { runAgent } from "./agent/orchestrator";
 import { applyToWellfoundJob } from "./apply/wellfound";
 import { runMigrations, db, schema } from "./db/client";
-import { loadProfile, profileExists } from "./profile/store";
+import { deleteFromBank, saveToBank } from "./profile/qabank";
+import { loadProfile, profileExists, saveProfile } from "./profile/store";
 import { runWizard } from "./profile/wizard";
 import { scrapeWellfoundJob } from "./search/wellfound";
 import { scoreJob } from "./search/scorer";
@@ -257,6 +258,100 @@ program
     } else if (result.status === "external") {
       p.outro(`External ATS link: ${result.url}`);
     }
+  });
+
+// ── bank ──────────────────────────────────────────────────────────────────────
+
+const bank = program
+  .command("bank")
+  .description("Manage your QA bank of reusable application answers");
+
+bank
+  .command("list")
+  .description("Show all stored questions and answers")
+  .action(() => {
+    requireProfile();
+    const { qaBank } = loadProfile();
+    const entries = Object.entries(qaBank);
+
+    if (entries.length === 0) {
+      console.log(chalk.dim("QA bank is empty. Answers are saved automatically after applying."));
+      return;
+    }
+
+    console.log(chalk.bold(`\n${entries.length} stored answer(s):\n`));
+    entries.forEach(([question, answer], i) => {
+      console.log(chalk.cyan(`${i + 1}. ${question}`));
+      console.log(`   ${answer.replace(/\n/g, "\n   ")}`);
+      console.log();
+    });
+  });
+
+bank
+  .command("add")
+  .description("Manually add a question and answer to the bank")
+  .action(async () => {
+    requireProfile();
+
+    const question = await p.text({
+      message: "Question (use a generalised form, e.g. 'Where are you currently located?'):",
+      validate: (v) => (!v ? "Required" : undefined),
+    });
+    if (p.isCancel(question)) return;
+
+    const answer = await p.text({
+      message: "Your answer:",
+      validate: (v) => (!v ? "Required" : undefined),
+    });
+    if (p.isCancel(answer)) return;
+
+    saveToBank(String(question), String(answer));
+    console.log(chalk.green("\n✓ Saved to QA bank"));
+  });
+
+bank
+  .command("delete <question>")
+  .description("Delete an entry from the bank by its exact question text")
+  .action((question: string) => {
+    requireProfile();
+    const deleted = deleteFromBank(question);
+    if (deleted) {
+      console.log(chalk.green(`✓ Deleted: "${question}"`));
+    } else {
+      console.log(chalk.red(`Not found: "${question}"`));
+    }
+  });
+
+bank
+  .command("edit")
+  .description("Edit an existing bank entry")
+  .action(async () => {
+    requireProfile();
+    const profile = loadProfile();
+    const entries = Object.entries(profile.qaBank);
+
+    if (entries.length === 0) {
+      console.log(chalk.dim("QA bank is empty."));
+      return;
+    }
+
+    const selected = await p.select({
+      message: "Which entry to edit?",
+      options: entries.map(([q]) => ({ value: q, label: q })),
+    });
+    if (p.isCancel(selected)) return;
+
+    const currentAnswer = profile.qaBank[String(selected)];
+    const newAnswer = await p.text({
+      message: "Updated answer:",
+      initialValue: currentAnswer,
+      validate: (v) => (!v ? "Required" : undefined),
+    });
+    if (p.isCancel(newAnswer)) return;
+
+    profile.qaBank[String(selected)] = String(newAnswer);
+    saveProfile(profile);
+    console.log(chalk.green("✓ Updated"));
   });
 
 // ── draft ─────────────────────────────────────────────────────────────────────
