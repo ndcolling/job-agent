@@ -93,6 +93,15 @@ export const ProfileSchema = z.object({
 
   qaBank: QABankSchema.default({}),
 
+  // Personal interests and passion areas — used to surface domain fit
+  // in applications (e.g. health/fitness for a sports-tech role)
+  interests: z
+    .object({
+      areas: z.array(z.string()).default([]), // e.g. ["health", "longevity", "fitness", "AI"]
+      narrative: z.string().optional(), // 2-3 sentences the user wrote about themselves personally
+    })
+    .default({ areas: [] }),
+
   // Demographic fields (optional, user sets defaults for voluntary disclosures)
   demographics: z
     .object({

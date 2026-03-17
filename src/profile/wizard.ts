@@ -372,6 +372,41 @@ async function stepProjects(prefill: Project[]): Promise<Project[]> {
   return projects;
 }
 
+async function stepInterests(prefill?: {
+  areas: string[];
+  narrative?: string;
+}): Promise<{ areas: string[]; narrative?: string }> {
+  p.note(
+    "Personal interests help us craft authentic applications for domain-fit roles\n" +
+      "(e.g. your passion for fitness is directly relevant to a sports-tech startup).",
+    "Step 6: Personal Interests"
+  );
+
+  const areasRaw = await p.text({
+    message: "Areas you're personally passionate about (comma-separated):",
+    placeholder: "health, longevity, fitness, AI, open source",
+    initialValue: prefill?.areas.join(", ") ?? "",
+  });
+  if (p.isCancel(areasRaw)) process.exit(0);
+
+  const narrative = await p.text({
+    message:
+      "In 2-3 sentences, describe yourself beyond your resume — hobbies, lifestyle, what drives you:",
+    placeholder:
+      "I train 5 days a week and have competed in obstacle races. I'm obsessed with performance data and longevity science...",
+    initialValue: prefill?.narrative ?? "",
+  });
+  if (p.isCancel(narrative)) process.exit(0);
+
+  return {
+    areas: String(areasRaw)
+      .split(",")
+      .map((a) => a.trim())
+      .filter(Boolean),
+    narrative: narrative ? String(narrative) : undefined,
+  };
+}
+
 // ── Main Wizard Entry ─────────────────────────────────────────────────────────
 
 export async function runWizard(): Promise<void> {
@@ -412,6 +447,9 @@ export async function runWizard(): Promise<void> {
     existing?.projects?.length ? existing.projects : parsed.projects
   );
 
+  // Step 6: Interests
+  const interests = await stepInterests(existing?.interests);
+
   // Assemble profile
   const now = new Date().toISOString();
   const profile: Profile = {
@@ -433,6 +471,7 @@ export async function runWizard(): Promise<void> {
     resumePath,
     resumeText,
     qaBank: existing?.qaBank ?? {},
+    interests,
   };
 
   saveProfile(profile);

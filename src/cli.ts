@@ -1,10 +1,14 @@
-import { Command } from "commander";
+import * as p from "@clack/prompts";
 import chalk from "chalk";
-import { eq, desc } from "drizzle-orm";
-import { runWizard } from "./profile/wizard";
+import { Command } from "commander";
+import { desc, eq } from "drizzle-orm";
 import { runAgent } from "./agent/orchestrator";
+import { applyToWellfoundJob } from "./apply/wellfound";
 import { runMigrations, db, schema } from "./db/client";
 import { loadProfile, profileExists } from "./profile/store";
+import { runWizard } from "./profile/wizard";
+import { scrapeWellfoundJob } from "./search/wellfound";
+import { scoreJob } from "./search/scorer";
 
 const program = new Command();
 
@@ -134,6 +138,125 @@ program
       .where(eq(schema.jobs.id, jobId));
 
     console.log(chalk.dim(`Skipped job ${jobId}`));
+  });
+
+// ── apply ─────────────────────────────────────────────────────────────────────
+
+program
+  .command("apply <url>")
+  .description("Scrape a Wellfound job URL, score it, draft responses, and apply")
+  .option("--skip-score", "Skip scoring and proceed directly to application")
+  .option("--dry-run", "Scrape and draft but do not submit")
+  .action(async (url: string, opts) => {
+    await ensureDb();
+    requireProfile();
+
+    const profile = loadProfile();
+
+    // 1. Scrape the job page
+    const spin = p.spinner();
+    spin.start("Scraping job listing...");
+    let job;
+    try {
+      job = await scrapeWellfoundJob(url);
+      spin.stop(`Found: ${chalk.bold(job.title)} @ ${chalk.bold(job.company)}`);
+    } catch (err) {
+      spin.stop("Failed to scrape job");
+      console.error(chalk.red((err as Error).message));
+      process.exit(1);
+    }
+
+    // 2. Show job summary
+    console.log();
+    console.log(chalk.dim(`  Location : ${job.location ?? "not specified"} ${job.remote ? "(remote)" : ""}`));
+    console.log(chalk.dim(`  Method   : ${job.applicationMethod}`));
+    if (job.compensation) console.log(chalk.dim(`  Comp     : ${job.compensation}`));
+    if (job.formQuestions.length > 0) {
+      console.log(chalk.dim(`  Questions: ${job.formQuestions.map((q) => q.label).join(" | ")}`));
+    }
+    if (job.applicationMethod === "email") {
+      console.log(chalk.dim(`  Email    : ${job.emailAddress}`));
+    }
+    console.log();
+
+    // 3. Score against profile
+    if (!opts.skipScore) {
+      spin.start("Scoring against your profile...");
+      const scored = await scoreJob(
+        {
+          title: job.title,
+          company: job.company,
+          url,
+          source: "wellfound",
+          description: job.description,
+          remote: job.remote ? "remote" : "onsite",
+          location: job.location ?? undefined,
+          salaryCurrency: "USD",
+        },
+        profile
+      );
+      spin.stop(
+        `Match score: ${chalk.bold(String(Math.round(scored.score)))} / 100`
+      );
+
+      console.log(chalk.dim(`  ${scored.reasoning}`));
+      if (scored.highlights.length) {
+        scored.highlights.forEach((h) => console.log(chalk.green(`  ✓ ${h}`)));
+      }
+      if (scored.redFlags.length) {
+        scored.redFlags.forEach((f) => console.log(chalk.yellow(`  ⚠ ${f}`)));
+      }
+      console.log();
+
+      if (scored.score < 40) {
+        const proceed = await p.confirm({
+          message: `Score is ${Math.round(scored.score)}/100 — low match. Proceed anyway?`,
+          initialValue: false,
+        });
+        if (p.isCancel(proceed) || !proceed) {
+          p.outro("Cancelled.");
+          return;
+        }
+      }
+    }
+
+    if (opts.dryRun) {
+      p.note("Dry run — stopping before application.", "Dry run");
+      return;
+    }
+
+    // 4. Apply
+    const result = await applyToWellfoundJob(job, profile);
+
+    // 5. Update DB
+    const jobRecord = {
+      id: crypto.randomUUID(),
+      source: "wellfound" as const,
+      title: job.title,
+      company: job.company,
+      url,
+      description: job.description,
+      location: job.location ?? undefined,
+      remote: job.remote ? "remote" : "onsite",
+      atsPlatform: job.applicationMethod,
+      status: result.status === "submitted" ? "applied" : "scored",
+      appliedAt: result.status === "submitted" ? new Date().toISOString() : undefined,
+      salaryCurrency: "USD",
+    };
+
+    await db
+      .insert(schema.jobs)
+      .values(jobRecord)
+      .onConflictDoNothing()
+      .catch(() => null); // URL already in DB
+
+    if (result.status === "submitted") {
+      p.outro(chalk.green("Application submitted and saved to pipeline."));
+    } else if (result.status === "email_ready") {
+      p.outro("Email draft ready. Saved to pipeline as 'scored'.");
+    } else if (result.status === "external") {
+      p.outro(`External ATS link: ${result.url}`);
+    }
   });
 
 // ── draft ─────────────────────────────────────────────────────────────────────
