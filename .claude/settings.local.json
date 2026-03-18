@@ -37,7 +37,11 @@
       "Bash(~/.nvm/versions/node/v22.17.0/bin/node /usr/local/bin/pnpm rebuild better-sqlite3 2>&1)",
       "Bash(~/.nvm/versions/node/v22.17.0/bin/node /usr/local/bin/pnpm store path 2>&1)",
       "Bash(docker build:*)",
-      "Bash(docker run:*)"
+      "Bash(docker run:*)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/tsx/dist/cli.mjs --version)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/tsx/dist/cli.mjs node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/.bin/tsc --noEmit)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/typescript/bin/tsc --noEmit 2>&1)"
     ]
   }
 }

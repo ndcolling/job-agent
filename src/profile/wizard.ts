@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
 import * as fs from "fs";
+import * as path from "path";
 import { config } from "../config";
 import {
   Contact,
@@ -103,45 +104,62 @@ async function stepResume(): Promise<{
   resumeText: string;
   parsed: Awaited<ReturnType<typeof parseResumeWithClaude>>;
 }> {
+  // Determine the data directory so we can hint the right path to the user
+  const dataDir = path.resolve(
+    path.dirname(config.profilePath)
+  );
+
   p.note(
-    "We'll start by reading your resume to pre-fill your profile.",
+    `Place your resume in the data directory and reference it by filename:\n` +
+      `  ${dataDir}/resume.pdf\n\n` +
+      `Or provide any absolute path if running outside Docker.`,
     "Step 1: Resume"
   );
 
   const resumePath = await p.text({
     message: "Path to your resume (PDF or .txt):",
-    placeholder: "~/Documents/resume.pdf",
+    placeholder: `${dataDir}/resume.pdf`,
     validate: (val) => {
       if (!val) return "Required";
-      const resolved = val.replace("~", process.env.HOME ?? "");
-      if (!fs.existsSync(resolved)) return `File not found: ${resolved}`;
+      const resolved = resolvePath(String(val), dataDir);
+      if (!fs.existsSync(resolved)) {
+        return (
+          `File not found: ${resolved}\n` +
+          `  → Copy your resume to ${dataDir}/ and try again`
+        );
+      }
     },
   });
 
   if (p.isCancel(resumePath)) process.exit(0);
 
-  const resolved = String(resumePath).replace("~", process.env.HOME ?? "");
+  const resolved = resolvePath(String(resumePath), dataDir);
+
+  // Copy resume into data/ if it isn't already there (keeps it alongside the profile)
+  const destPath = path.join(dataDir, path.basename(resolved));
+  if (resolved !== destPath && !fs.existsSync(destPath)) {
+    fs.copyFileSync(resolved, destPath);
+    p.note(`Copied to ${destPath}`, "Resume");
+  }
+  const storedPath = fs.existsSync(destPath) ? destPath : resolved;
+
   let resumeText = "";
 
   if (resolved.endsWith(".pdf")) {
-    // For PDF, we read it as binary and pass a note — user should convert or we use pdftotext
     const spin = p.spinner();
-    spin.start("Reading PDF...");
+    spin.start("Extracting text from PDF...");
     try {
-      // Attempt to extract text via pdftotext if available
-      const { execSync } = require("child_process");
-      resumeText = execSync(`pdftotext "${resolved}" -`, {
-        encoding: "utf-8",
-      });
+      const { execSync } = require("child_process") as typeof import("child_process");
+      resumeText = execSync(`pdftotext "${resolved}" -`, { encoding: "utf-8" });
       spin.stop("PDF extracted");
     } catch {
-      spin.stop("pdftotext not available — treating as binary");
+      spin.stop("pdftotext not available");
       p.note(
-        "Install pdftotext (brew install poppler) for best results.\n" +
-          "Alternatively, save your resume as a .txt file.",
+        "Could not extract PDF text automatically.\n" +
+          "For best results: save your resume as a .txt file alongside the PDF.",
         "Tip"
       );
-      resumeText = `[PDF file: ${resolved}]`;
+      resumeText = `[PDF file: ${resolved} — paste resume text below if parsing fails]`;
     }
   } else {
     resumeText = fs.readFileSync(resolved, "utf-8");
@@ -152,7 +170,17 @@ async function stepResume(): Promise<{
   const parsed = await parseResumeWithClaude(resumeText);
   spin.stop("Resume parsed");
 
-  return { resumePath: resolved, resumeText, parsed };
+  return { resumePath: storedPath, resumeText, parsed };
+}
+
+/** Resolve a path: bare filename → relative to dataDir, otherwise standard. */
+function resolvePath(input: string, dataDir: string): string {
+  const expanded = input.replace(/^~/, process.env.HOME ?? "");
+  // If no directory separator, assume it's a filename in the data dir
+  if (!expanded.includes("/")) {
+    return path.join(dataDir, expanded);
+  }
+  return path.resolve(expanded);
 }
 
 async function stepContact(prefill: Partial<Contact>): Promise<Contact> {
