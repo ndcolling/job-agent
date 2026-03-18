@@ -1,35 +1,29 @@
-import BetterSqlite3 from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 import * as fs from "fs";
 import * as path from "path";
 import { config } from "../config";
 import * as schema from "./schema";
 
-const _sqlite = new BetterSqlite3((() => {
+function createDb() {
   const dbPath = path.resolve(config.dbPath);
   const dir = path.dirname(dbPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dbPath;
-})());
 
-_sqlite.pragma("journal_mode = WAL");
-_sqlite.pragma("foreign_keys = ON");
-
-export const db = drizzle(_sqlite, { schema });
-
-export async function runMigrations() {
-  const migrationsFolder = path.resolve("./drizzle");
-  if (fs.existsSync(migrationsFolder)) {
-    migrate(db, { migrationsFolder });
-  } else {
-    // No migrations yet — create tables directly from schema in dev
-    initTablesDirectly();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
+
+  const client = createClient({ url: `file:${dbPath}` });
+  const db = drizzle(client, { schema });
+  return { db, client };
 }
 
-function initTablesDirectly() {
-  _sqlite.exec(`
+const { db, client } = createDb();
+export { db, client };
+
+export async function runMigrations(): Promise<void> {
+  // Create tables if they don't exist (dev-mode schema sync)
+  await client.executeMultiple(`
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       source TEXT NOT NULL,

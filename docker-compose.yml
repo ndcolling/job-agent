@@ -1,0 +1,19 @@
+services:
+  job-agent:
+    build:
+      context: .
+      target: dev
+    image: job-agent:dev
+    # Mount local data/ so the DB, profile, and resume persist between runs
+    volumes:
+      - ./data:/app/data
+    # Pass your .env into the container
+    env_file:
+      - .env
+    # Playwright needs these for headed mode (used during form review)
+    # On macOS with Docker Desktop, DISPLAY forwarding requires XQuartz.
+    # For headless-only use, leave these commented out.
+    # environment:
+    #   - DISPLAY=host.docker.internal:0
+    stdin_open: true
+    tty: true

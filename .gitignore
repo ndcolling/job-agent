@@ -1,6 +1,9 @@
 node_modules/
 dist/
 
+# Docker
+.docker/
+
 # Local data — contains personal info and credentials
 data/
 !data/.gitkeep

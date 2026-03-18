@@ -26,7 +26,18 @@
       "Bash(git commit:*)",
       "Bash(gh repo:*)",
       "Bash(ls src/**/*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(node -p \"process.arch\")",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node -p \"process.arch\")",
+      "Bash(PATH=\"$HOME/.nvm/versions/node/v22.17.0/bin:$PATH\" /usr/local/bin/pnpm install)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node /usr/local/bin/pnpm install)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/.bin/tsx src/cli.ts --help)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/tsx/dist/cli.mjs --help)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node node_modules/tsx/dist/cli.mjs src/cli.ts --help)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node /usr/local/bin/pnpm rebuild better-sqlite3 2>&1)",
+      "Bash(~/.nvm/versions/node/v22.17.0/bin/node /usr/local/bin/pnpm store path 2>&1)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)"
     ]
   }
 }

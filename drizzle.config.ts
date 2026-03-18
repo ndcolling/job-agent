@@ -7,7 +7,8 @@ export default {
   schema: "./src/db/schema.ts",
   out: "./drizzle",
   dialect: "sqlite",
+  driver: "turso",
   dbCredentials: {
-    url: process.env.DB_PATH ?? "./data/jobs.db",
+    url: `file:${process.env.DB_PATH ?? "./data/jobs.db"}`,
   },
 } satisfies Config;
